@@ -16,18 +16,18 @@
     #define LOG(s) std::cout << "\n[" << __FILE__ << ":" << __LINE__ << "] " << s << "\n" << std::flush
     #define HERE LOG("HERE")
     #define DUMP(expr) std::cout << "\n" << #expr << "\n↳ " << (expr) << "\n"
-    #define DEBUG_CODE(...) __VA_ARGS__
     #define ASSERTM(cond, msg) if (!(cond)) { LOG("Error: " << msg); panic(); }
     #define ASSERT(cond) if (!(cond)) { LOG("Failed Assert: `" << #cond << "`"); panic(); }
+    #define PANIC(msg) ASSERTM(false, msg)
 
 #else
 
     #define LOG(s) ;
     #define HERE ;
     #define DUMP(expr) ;
-    #define DEBUG_CODE(...)
     #define ASSERTM(cond, msg) ;
     #define ASSERT(cond) ;
+    #define PANIC(msg) ;
     
 #endif
 
@@ -127,6 +127,26 @@ void panic()
 
 using cstring = char const*;
 
+/// Do not use this directly, represents a pointer that has its block size stored
+/// in the sizeof(size_t) previous bytes of the pointer (ptr - sizeof(size_t))
+using OwningPointer = uint8_t*;
+
+
+// TODO: make this thread safe, remember different threads can use the same memory,
+//       so i can't make this thread local but must be shared among all threads
+#ifdef EASYSPOT_DEBUG
+    struct RegistryRecord
+    {
+        OwningPointer block;
+        uint16_t generation;
+    };
+
+    // TODO: make this actually performant and use data oriented design
+    // TODO: implement generation logic + pointer flagging for local generation
+    // TODO: implement last access tick to track elapsed time between last block access and block drop
+    std::vector<RegistryRecord> debug_mem_registry;
+#endif
+
 
 /// A non-owning pointer (it has not clue about the size of the pointed block)
 template<typename PointeeT>
@@ -141,13 +161,35 @@ struct ref
     
     PointeeT& operator*()
     {
+        check_use();
         return *bptr;
     }
     
     PointeeT* operator->()
     {
+        check_use();
         return bptr;
     }
+
+    #ifdef EASYSPOT_DEBUG
+        inline void check_use()
+        {
+            for (auto i = 0; i < debug_mem_registry.size(); i++)
+            {
+                auto record = debug_mem_registry[i];
+                auto record_block_size = ((size_t*)(record.block - sizeof(size_t)))[0];
+                if ((uint8_t*)bptr >= record.block && (uint8_t*)bptr <= record.block + record_block_size)
+                    return;
+            }
+
+            PANIC("Use of dead reference");
+        }
+    #else
+        inline void check_use()
+        {
+
+        }
+    #endif
 };
 
 
@@ -155,16 +197,21 @@ struct ref
 /// contains the actual pointer to the block and the size of the block
 struct block
 {
-    uint8_t* bptr;
+    OwningPointer bptr;
 
     block(size_t size)
     {
-        bptr = new uint8_t[size];
+        // TODO: consider using uint32_t instead
+        bptr = new uint8_t[sizeof(size_t) + size];
 
         // storing the size of the block in the first bytes
         // and advancing the pointer by default
         ((size_t*)bptr)[0] = size;
         bptr += sizeof(size_t);
+
+        #ifdef EASYSPOT_DEBUG
+            debug_mem_registry.push_back(RegistryRecord { .block = bptr, .generation = 0 });
+        #endif
     }
 
     ~block()
@@ -172,9 +219,36 @@ struct block
         // not allowed to deallocate internal block
     }
 
+    void drop()
+    {
+        check_drop();
+        auto actual_ptr = bptr - sizeof(size_t);
+        delete[] actual_ptr;
+    }
+
+    #ifdef EASYSPOT_DEBUG
+        inline void check_drop()
+        {
+            for (auto i = 0; i < debug_mem_registry.size(); i++)
+                if (bptr == debug_mem_registry[i].block)
+                {
+                    std::swap(debug_mem_registry[i], debug_mem_registry.back());
+                    debug_mem_registry.pop_back();
+                    return;
+                }
+            
+            PANIC("Drop of dead block. Maybe double drop?");
+        }
+    #else
+        inline void check_drop()
+        {
+            
+        }
+    #endif
+
     size_t size()
     {
-        return (bptr - sizeof(size_t))[0];
+        return ((size_t*)(bptr - sizeof(size_t)))[0];
     }
 
     template<typename PointeeT>
@@ -185,7 +259,7 @@ struct block
 };
 
 
-/// Typed owning pointer that holding a sequence of concrete elements
+/// Typed owning pointer that holds a sequence of concrete elements
 template<typename PointeeT>
 struct seq
 {
@@ -216,4 +290,18 @@ struct seq
         ASSERTM(idx < capacity(), "Index out of bounds");
         return ref<PointeeT>(b.bptr + idx * sizeof(PointeeT));
     }
+
+    void drop()
+    {
+        b.drop();
+    }
+};
+
+
+/// Just like `block` has `ref`, so does `seq` with `slice`
+struct slice
+{
+    uint8_t* bptr;
+
+    // TODO: implement this
 };

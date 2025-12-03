@@ -22,12 +22,19 @@ int main()
     DUMP(*n);
 
     HERE;
-    LOG("s cap -> " << s.capacity());
+    LOG("s cap = " << s.capacity());
 
     // ERRORS
 
-    auto out_of_bounds_ref = s.nth(s.capacity());
+    //auto out_of_bounds_ref = s.nth(s.capacity());
     //auto out_of_bounds = s[s.capacity()];
 
+    //b.drop(); *r = 2;
+    //b.drop(); b.drop();
+
+    //s.drop(); *n = 0;
+
+    // TODO, print them all (mainly size), print number of undropped blocks
+    //check_registry_for_undropped_blocks();
     return 0;
 }
